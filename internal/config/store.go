@@ -75,4 +75,3 @@ func (s *Store) persistLocked() error {
 	}
 	return os.WriteFile(s.path, payload, 0o644)
 }
-

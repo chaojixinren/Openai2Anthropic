@@ -72,9 +72,6 @@ func (c *Config) Normalize() {
 		}
 		upstream.BaseURL = normalizeBaseURL(upstream.BaseURL)
 		upstream.APIKey = strings.TrimSpace(upstream.APIKey)
-		if !upstream.Enabled {
-			upstream.Enabled = upstream.BaseURL != "" && upstream.APIKey != ""
-		}
 		normalized = append(normalized, upstream)
 	}
 	c.Upstreams = normalized
@@ -137,4 +134,3 @@ func normalizeBaseURL(value string) string {
 	trimmed := strings.TrimSpace(value)
 	return strings.TrimRight(trimmed, "/")
 }
-

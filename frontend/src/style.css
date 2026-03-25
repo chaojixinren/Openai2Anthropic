@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply min-h-screen bg-paper bg-grain font-sans text-ink antialiased;
+  }
+
+  ::selection {
+    @apply bg-sand text-ink;
+  }
+}
+
+@layer components {
+  .zen-card {
+    @apply rounded-[28px] border border-white/40 bg-ivory/85 shadow-cloud backdrop-blur;
+  }
+
+  .zen-input {
+    @apply w-full rounded-2xl border border-oat/70 bg-white/70 px-4 py-3 text-sm text-ink shadow-sm outline-none transition duration-200 placeholder:text-mist/70 focus:border-sand focus:ring-2 focus:ring-sand/30;
+  }
+
+  .zen-label {
+    @apply mb-2 block text-xs uppercase tracking-[0.24em] text-mist;
+  }
+
+  .zen-button {
+    @apply inline-flex items-center justify-center rounded-full bg-ink px-5 py-3 text-sm font-medium text-stone-50 shadow-float transition duration-200 hover:-translate-y-0.5 hover:bg-zinc-900;
+  }
+
+  .zen-button-soft {
+    @apply inline-flex items-center justify-center rounded-full border border-oat bg-white/70 px-4 py-3 text-sm text-ink shadow-sm transition duration-200 hover:-translate-y-0.5 hover:shadow-float;
+  }
+
+  .zen-pill {
+    @apply inline-flex items-center rounded-full border border-white/60 bg-white/75 px-3 py-1 text-xs text-mist shadow-sm;
+  }
+}
+

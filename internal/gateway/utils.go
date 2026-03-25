@@ -109,4 +109,3 @@ func mapFinishReason(value string) string {
 		return "end_turn"
 	}
 }
-

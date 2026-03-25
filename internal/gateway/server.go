@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -115,6 +116,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if !allowLocalAdmin(w, r) {
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, s.store.Get())
@@ -140,6 +145,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminModels(w http.ResponseWriter, r *http.Request) {
+	if !allowLocalAdmin(w, r) {
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"message": "method not allowed"})
 		return
@@ -272,8 +281,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var lastMessage string
 	for _, upstream := range upstreams {
 		models, _ := s.fetchUpstreamModels(r.Context(), upstream)
-		selectedModel := resolveRequestedModel(req.Model, models)
-		payload, err := buildOpenAIRequest(req, selectedModel)
+		selectedModel := resolveModel(req.Model, models)
+		payload, estimatedInputTokens, err := buildOpenAIRequest(req, selectedModel)
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
@@ -328,7 +337,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Proxy-Upstream", upstream.Name)
 
 		if req.Stream {
-			streamErr := s.streamAnthropicResponse(w, resp, req.Model, estimateAnthropicInputTokens(req))
+			streamErr := s.streamAnthropicResponse(w, resp, req.Model, estimatedInputTokens)
 			cancel()
 			if streamErr != nil && errors.Is(streamErr, context.Canceled) {
 				return
@@ -349,7 +358,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		transformed, transformErr := transformNonStreamingResponse(rawResp, req.Model)
+		transformed, transformErr := transformOpenAIResponse(rawResp, req.Model)
 		if transformErr != nil {
 			lastStatus = http.StatusBadGateway
 			lastMessage = transformErr.Error()
@@ -523,4 +532,24 @@ func statusForUpstreamFailure(status int) int {
 	default:
 		return http.StatusBadGateway
 	}
+}
+
+func allowLocalAdmin(w http.ResponseWriter, r *http.Request) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return true
+	}
+
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"message": "admin api only allows loopback access",
+	})
+	return false
 }

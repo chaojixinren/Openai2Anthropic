@@ -24,15 +24,15 @@ type anthropicTool struct {
 }
 
 type openAIChatRequest struct {
-	Model         string                `json:"model"`
-	Messages      []openAIMessage       `json:"messages"`
-	Tools         []openAITool          `json:"tools,omitempty"`
-	ToolChoice    any                   `json:"tool_choice,omitempty"`
-	MaxTokens     int                   `json:"max_tokens,omitempty"`
-	Temperature   *float64              `json:"temperature,omitempty"`
-	Stream        bool                  `json:"stream,omitempty"`
-	StreamOptions *openAIStreamOptions  `json:"stream_options,omitempty"`
-	Stop          any                   `json:"stop,omitempty"`
+	Model         string               `json:"model"`
+	Messages      []openAIMessage      `json:"messages"`
+	Tools         []openAITool         `json:"tools,omitempty"`
+	ToolChoice    any                  `json:"tool_choice,omitempty"`
+	MaxTokens     int                  `json:"max_tokens,omitempty"`
+	Temperature   *float64             `json:"temperature,omitempty"`
+	Stream        bool                 `json:"stream,omitempty"`
+	StreamOptions *openAIStreamOptions `json:"stream_options,omitempty"`
+	Stop          any                  `json:"stop,omitempty"`
 }
 
 type openAIMessage struct {
@@ -91,10 +91,10 @@ type openAIDelta struct {
 }
 
 type openAIStreamToolUse struct {
-	Index    int                        `json:"index"`
-	ID       string                     `json:"id,omitempty"`
-	Type     string                     `json:"type,omitempty"`
-	Function openAIStreamToolFunction   `json:"function"`
+	Index    int                      `json:"index"`
+	ID       string                   `json:"id,omitempty"`
+	Type     string                   `json:"type,omitempty"`
+	Function openAIStreamToolFunction `json:"function"`
 }
 
 type openAIStreamToolFunction struct {
@@ -120,4 +120,3 @@ type openAIModelsEnvelope struct {
 type openAIModel struct {
 	ID string `json:"id"`
 }
-
