@@ -282,7 +282,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	for _, upstream := range upstreams {
 		models, _ := s.fetchUpstreamModels(r.Context(), upstream)
 		selectedModel := resolveModel(req.Model, models)
-		payload, estimatedInputTokens, err := buildOpenAIRequest(req, selectedModel)
+		payload, estimatedInputTokens, err := buildOpenAI2Request(req, selectedModel)
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
@@ -295,7 +295,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(upstream.BaseURL, "/v1/chat/completions"), bytes.NewReader(raw))
+		// Use OpenAI Responses API endpoint
+		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(upstream.BaseURL, "/v1/responses"), bytes.NewReader(raw))
 		if err != nil {
 			cancel()
 			writeAnthropicError(w, http.StatusInternalServerError, "failed to build upstream request")
@@ -358,7 +359,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		transformed, transformErr := transformOpenAIResponse(rawResp, req.Model)
+		transformed, transformErr := transformOpenAI2Response(rawResp, req.Model)
 		if transformErr != nil {
 			lastStatus = http.StatusBadGateway
 			lastMessage = transformErr.Error()

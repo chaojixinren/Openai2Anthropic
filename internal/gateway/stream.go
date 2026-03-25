@@ -10,19 +10,20 @@ import (
 	"strings"
 )
 
-type streamBlock struct {
-	AnthropicIndex int
-	OpenAIIndex    int
-	Kind           string
-	Started        bool
-}
-
 type streamState struct {
-	RequestedModel string
-	InputTokens    int
-	OutputText     strings.Builder
-	Current        *streamBlock
-	TextStarted    bool
+	RequestedModel   string
+	InputTokens      int
+	OutputTokens     int
+	MessageID        string
+	MessageStarted   bool
+	TextBlockStarted bool
+	ToolBlockStarted bool
+	TextIndex        int
+	ToolIndex        int
+	CurrentToolID    string
+	CurrentToolName  string
+	ToolArguments    string
+	OutputText       strings.Builder
 }
 
 func (s *Server) streamAnthropicResponse(w http.ResponseWriter, resp *http.Response, requestedModel string, estimatedInputTokens int) error {
@@ -50,7 +51,7 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, resp *http.Respo
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
 			if event.Len() > 0 {
-				done, err := consumeOpenAIStreamEvent(w, flusher, state, event.Bytes())
+				done, err := consumeOpenAI2StreamEvent(w, flusher, state, event.Bytes())
 				if err != nil {
 					return err
 				}
@@ -70,189 +71,234 @@ func (s *Server) streamAnthropicResponse(w http.ResponseWriter, resp *http.Respo
 	}
 
 	if event.Len() > 0 {
-		_, err := consumeOpenAIStreamEvent(w, flusher, state, event.Bytes())
+		_, err := consumeOpenAI2StreamEvent(w, flusher, state, event.Bytes())
 		return err
 	}
 	return nil
 }
 
-func consumeOpenAIStreamEvent(w http.ResponseWriter, flusher http.Flusher, state *streamState, raw []byte) (bool, error) {
+// OpenAI2 stream event types
+type openAI2StreamEvent struct {
+	Type         string `json:"type"`
+	OutputIndex  int    `json:"output_index,omitempty"`
+	ContentIndex int    `json:"content_index,omitempty"`
+	Delta        string `json:"delta,omitempty"`
+	Response     *struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Usage  struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
+	} `json:"response,omitempty"`
+	Item *struct {
+		Type      string `json:"type"`
+		ID        string `json:"id,omitempty"`
+		Role      string `json:"role,omitempty"`
+		CallID    string `json:"call_id,omitempty"`
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+		Status    string `json:"status,omitempty"`
+	} `json:"item,omitempty"`
+}
+
+func consumeOpenAI2StreamEvent(w http.ResponseWriter, flusher http.Flusher, state *streamState, raw []byte) (bool, error) {
 	payload := strings.TrimSpace(extractSSEData(raw))
 	if payload == "" {
 		return false, nil
 	}
 	if payload == "[DONE]" {
-		if err := finalizeAnthropicStream(w, flusher, state, mapFinishReason("stop"), 0); err != nil {
-			return false, err
-		}
+		finalizeStream(w, flusher, state, "end_turn")
 		return true, nil
 	}
 
-	var chunk openAIChatResponse
-	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-		return false, err
-	}
-	if len(chunk.Choices) == 0 {
+	var evt openAI2StreamEvent
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
 		return false, nil
 	}
 
-	choice := chunk.Choices[0]
-	if !state.TextStarted && state.Current == nil {
-		if err := writeSSE(w, "message_start", map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id":      firstNonEmpty(chunk.ID, randomID("msg")),
-				"type":    "message",
-				"role":    "assistant",
-				"model":   firstNonEmpty(state.RequestedModel, chunk.Model),
-				"content": []any{},
-				"usage": map[string]any{
-					"input_tokens":  state.InputTokens,
-					"output_tokens": 0,
-				},
-			},
-		}); err != nil {
-			return false, err
-		}
-		flusher.Flush()
-	}
-
-	if text := choice.Delta.Content; text != "" {
-		if err := ensureTextBlockStarted(w, flusher, state); err != nil {
-			return false, err
-		}
-		state.OutputText.WriteString(text)
-		if err := writeSSE(w, "content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": state.Current.AnthropicIndex,
-			"delta": map[string]any{
-				"type": "text_delta",
-				"text": text,
-			},
-		}); err != nil {
-			return false, err
-		}
-		flusher.Flush()
-	}
-
-	for _, tool := range choice.Delta.ToolCalls {
-		if err := ensureToolBlockStarted(w, flusher, state, tool); err != nil {
-			return false, err
-		}
-		if tool.Function.Arguments != "" {
-			if err := writeSSE(w, "content_block_delta", map[string]any{
-				"type":  "content_block_delta",
-				"index": state.Current.AnthropicIndex,
-				"delta": map[string]any{
-					"type":         "input_json_delta",
-					"partial_json": tool.Function.Arguments,
+	switch evt.Type {
+	case "response.created":
+		if evt.Response != nil {
+			state.MessageID = evt.Response.ID
+			state.MessageStarted = true
+			if err := writeSSE(w, "message_start", map[string]any{
+				"type": "message_start",
+				"message": map[string]any{
+					"id":      state.MessageID,
+					"type":    "message",
+					"role":    "assistant",
+					"model":   state.RequestedModel,
+					"content": []any{},
+					"usage": map[string]any{
+						"input_tokens":  state.InputTokens,
+						"output_tokens": 0,
+					},
 				},
 			}); err != nil {
 				return false, err
 			}
 			flusher.Flush()
 		}
-	}
 
-	if choice.FinishReason != "" {
-		outputTokens := chunk.Usage.CompletionTokens
-		if outputTokens == 0 {
-			outputTokens = estimateTextTokens(state.OutputText.String())
+	case "response.output_text.delta":
+		if evt.Delta != "" {
+			if !state.TextBlockStarted {
+				state.TextBlockStarted = true
+				state.TextIndex = 0
+				if err := writeSSE(w, "content_block_start", map[string]any{
+					"type":  "content_block_start",
+					"index": 0,
+					"content_block": map[string]any{
+						"type": "text",
+						"text": "",
+					},
+				}); err != nil {
+					return false, err
+				}
+				flusher.Flush()
+			}
+
+			state.OutputText.WriteString(evt.Delta)
+			if err := writeSSE(w, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]any{
+					"type": "text_delta",
+					"text": evt.Delta,
+				},
+			}); err != nil {
+				return false, err
+			}
+			flusher.Flush()
 		}
-		if err := finalizeAnthropicStream(w, flusher, state, mapFinishReason(choice.FinishReason), outputTokens); err != nil {
-			return false, err
+
+	case "response.output_item.added":
+		if evt.Item != nil && evt.Item.Type == "function_call" {
+			// Close text block if open
+			if state.TextBlockStarted {
+				if err := writeSSE(w, "content_block_stop", map[string]any{
+					"type":  "content_block_stop",
+					"index": state.TextIndex,
+				}); err != nil {
+					return false, err
+				}
+				flusher.Flush()
+				state.TextBlockStarted = false
+				state.ToolIndex = 1
+			} else {
+				state.ToolIndex = 0
+			}
+
+			state.ToolBlockStarted = true
+			state.CurrentToolID = evt.Item.CallID
+			if state.CurrentToolID == "" {
+				state.CurrentToolID = evt.Item.ID
+			}
+			state.CurrentToolName = evt.Item.Name
+			state.ToolArguments = ""
+
+			if err := writeSSE(w, "content_block_start", map[string]any{
+				"type":  "content_block_start",
+				"index": state.ToolIndex,
+				"content_block": map[string]any{
+					"type":  "tool_use",
+					"id":    state.CurrentToolID,
+					"name":  state.CurrentToolName,
+					"input": map[string]any{},
+				},
+			}); err != nil {
+				return false, err
+			}
+			flusher.Flush()
 		}
+
+	case "response.function_call_arguments.delta":
+		if state.ToolBlockStarted && evt.Delta != "" {
+			state.ToolArguments += evt.Delta
+			if err := writeSSE(w, "content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": state.ToolIndex,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": evt.Delta,
+				},
+			}); err != nil {
+				return false, err
+			}
+			flusher.Flush()
+		}
+
+	case "response.output_item.done":
+		if evt.Item != nil && evt.Item.Type == "function_call" && state.ToolBlockStarted {
+			if err := writeSSE(w, "content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": state.ToolIndex,
+			}); err != nil {
+				return false, err
+			}
+			flusher.Flush()
+			state.ToolBlockStarted = false
+		}
+
+	case "response.completed":
+		if evt.Response != nil {
+			state.OutputTokens = evt.Response.Usage.OutputTokens
+			if evt.Response.Usage.InputTokens > 0 {
+				state.InputTokens = evt.Response.Usage.InputTokens
+			}
+		}
+
+		stopReason := "end_turn"
+		if state.ToolBlockStarted || state.CurrentToolID != "" {
+			stopReason = "tool_use"
+		}
+		finalizeStream(w, flusher, state, stopReason)
 		return true, nil
+
+	case "error":
+		// Handle error events
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &errResp); err == nil && errResp.Error.Message != "" {
+			return false, fmt.Errorf("upstream error: %s", errResp.Error.Message)
+		}
 	}
 
 	return false, nil
 }
 
-func ensureTextBlockStarted(w http.ResponseWriter, flusher http.Flusher, state *streamState) error {
-	if state.Current != nil && state.Current.Kind == "text" {
-		return nil
-	}
-	if err := closeCurrentBlock(w, flusher, state); err != nil {
-		return err
-	}
-
-	state.TextStarted = true
-	state.Current = &streamBlock{
-		AnthropicIndex: 0,
-		OpenAIIndex:    0,
-		Kind:           "text",
-		Started:        true,
+func finalizeStream(w http.ResponseWriter, flusher http.Flusher, state *streamState, stopReason string) error {
+	// Close any open blocks
+	if state.TextBlockStarted {
+		if err := writeSSE(w, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": state.TextIndex,
+		}); err != nil {
+			return err
+		}
+		flusher.Flush()
 	}
 
-	if err := writeSSE(w, "content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": 0,
-		"content_block": map[string]any{
-			"type": "text",
-			"text": "",
-		},
-	}); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
-}
-
-func ensureToolBlockStarted(w http.ResponseWriter, flusher http.Flusher, state *streamState, tool openAIStreamToolUse) error {
-	anthropicIndex := tool.Index
-	if state.TextStarted {
-		anthropicIndex++
+	if state.ToolBlockStarted {
+		if err := writeSSE(w, "content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": state.ToolIndex,
+		}); err != nil {
+			return err
+		}
+		flusher.Flush()
 	}
 
-	if state.Current != nil && state.Current.Kind == "tool_use" && state.Current.OpenAIIndex == tool.Index {
-		return nil
-	}
-	if err := closeCurrentBlock(w, flusher, state); err != nil {
-		return err
+	outputTokens := state.OutputTokens
+	if outputTokens == 0 {
+		outputTokens = estimateTextTokens(state.OutputText.String())
 	}
 
-	state.Current = &streamBlock{
-		AnthropicIndex: anthropicIndex,
-		OpenAIIndex:    tool.Index,
-		Kind:           "tool_use",
-		Started:        true,
-	}
-
-	if err := writeSSE(w, "content_block_start", map[string]any{
-		"type":  "content_block_start",
-		"index": anthropicIndex,
-		"content_block": map[string]any{
-			"type":  "tool_use",
-			"id":    firstNonEmpty(tool.ID, randomID("toolu")),
-			"name":  tool.Function.Name,
-			"input": map[string]any{},
-		},
-	}); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
-}
-
-func closeCurrentBlock(w http.ResponseWriter, flusher http.Flusher, state *streamState) error {
-	if state.Current == nil {
-		return nil
-	}
-	if err := writeSSE(w, "content_block_stop", map[string]any{
-		"type":  "content_block_stop",
-		"index": state.Current.AnthropicIndex,
-	}); err != nil {
-		return err
-	}
-	flusher.Flush()
-	state.Current = nil
-	return nil
-}
-
-func finalizeAnthropicStream(w http.ResponseWriter, flusher http.Flusher, state *streamState, stopReason string, outputTokens int) error {
-	if err := closeCurrentBlock(w, flusher, state); err != nil {
-		return err
-	}
 	if err := writeSSE(w, "message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
@@ -266,6 +312,7 @@ func finalizeAnthropicStream(w http.ResponseWriter, flusher http.Flusher, state 
 		return err
 	}
 	flusher.Flush()
+
 	if err := writeSSE(w, "message_stop", map[string]any{"type": "message_stop"}); err != nil {
 		return err
 	}

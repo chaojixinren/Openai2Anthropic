@@ -6,343 +6,465 @@ import (
 	"strings"
 )
 
-func buildOpenAIRequest(req anthropicRequest, model string) (openAIChatRequest, int, error) {
-	messages := make([]openAIMessage, 0, len(req.Messages)+1)
+// ============ Anthropic Request Types ============
+
+type anthropicRequest struct {
+	Model         string           `json:"model"`
+	System        any              `json:"system,omitempty"`
+	Messages      []anthropicInput `json:"messages"`
+	Tools         []anthropicTool  `json:"tools,omitempty"`
+	ToolChoice    any              `json:"tool_choice,omitempty"`
+	MaxTokens     int              `json:"max_tokens,omitempty"`
+	Temperature   *float64         `json:"temperature,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
+	StopSequences []string         `json:"stop_sequences,omitempty"`
+}
+
+type anthropicInput struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type anthropicTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+// ============ OpenAI Responses API Types ============
+
+type openAI2Request struct {
+	Model           string          `json:"model"`
+	Instructions    string          `json:"instructions,omitempty"`
+	Input           []any           `json:"input"`
+	Tools           []openAI2Tool   `json:"tools,omitempty"`
+	ToolChoice      any             `json:"tool_choice,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+}
+
+type openAI2Tool struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+type openAI2Response struct {
+	ID     string              `json:"id"`
+	Object string              `json:"object"`
+	Status string              `json:"status"`
+	Output []openAI2OutputItem `json:"output"`
+	Usage  struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
+}
+
+type openAI2OutputItem struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+	} `json:"content,omitempty"`
+	Status    string `json:"status,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// ============ Build Request ============
+
+func buildOpenAI2Request(req anthropicRequest, model string) (openAI2Request, int, error) {
 	estimatedInputTokens := 0
 
+	result := openAI2Request{
+		Model:  model,
+		Stream: req.Stream,
+		Input:  make([]any, 0),
+	}
+
+	// Convert system to instructions
 	if systemText := extractSystemText(req.System); systemText != "" {
-		messages = append(messages, openAIMessage{
-			Role:    "system",
-			Content: systemText,
-		})
+		result.Instructions = systemText
 		estimatedInputTokens += estimateTextTokens(systemText)
 	}
 
-	for _, message := range req.Messages {
-		converted, tokens, err := convertAnthropicMessage(message)
-		if err != nil {
-			return openAIChatRequest{}, 0, err
-		}
-		messages = append(messages, converted...)
+	// Convert messages to input
+	for _, msg := range req.Messages {
+		items, tokens := convertAnthropicMessageToOpenAI2Items(msg)
+		result.Input = append(result.Input, items...)
 		estimatedInputTokens += tokens
 	}
 
-	payload := openAIChatRequest{
-		Model:    model,
-		Messages: messages,
-		Stream:   req.Stream,
-	}
-	if req.MaxTokens > 0 {
-		payload.MaxTokens = req.MaxTokens
-	}
-	if req.Temperature != nil {
-		payload.Temperature = req.Temperature
-	}
-	if len(req.StopSequences) == 1 {
-		payload.Stop = req.StopSequences[0]
-	} else if len(req.StopSequences) > 1 {
-		payload.Stop = req.StopSequences
-	}
-	if req.Stream {
-		payload.StreamOptions = &openAIStreamOptions{IncludeUsage: true}
-	}
-
+	// Convert tools
 	if len(req.Tools) > 0 {
-		payload.Tools = make([]openAITool, 0, len(req.Tools))
+		result.Tools = make([]openAI2Tool, 0, len(req.Tools))
 		for _, tool := range req.Tools {
-			payload.Tools = append(payload.Tools, openAITool{
-				Type: "function",
-				Function: openAIToolFunctionSpec{
-					Name:        tool.Name,
-					Description: tool.Description,
-					Parameters:  tool.InputSchema,
-				},
+			result.Tools = append(result.Tools, openAI2Tool{
+				Type:        "function",
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.InputSchema,
 			})
 		}
 
-		switch choice := req.ToolChoice.(type) {
-		case string:
-			switch choice {
-			case "auto":
-				payload.ToolChoice = "auto"
-			case "any":
-				payload.ToolChoice = "required"
-			}
-		case map[string]any:
-			if choiceType, _ := choice["type"].(string); choiceType == "tool" {
-				if name, _ := choice["name"].(string); name != "" {
-					payload.ToolChoice = map[string]any{
-						"type": "function",
-						"function": map[string]any{
-							"name": name,
-						},
-					}
-				}
-			}
-		}
-		if payload.ToolChoice == nil {
-			payload.ToolChoice = "auto"
-		}
+		// Map tool_choice
+		result.ToolChoice = mapToolChoice(req.ToolChoice, hasToolResult(req.Messages))
 	}
 
-	return payload, estimatedInputTokens, nil
+	if req.MaxTokens > 0 {
+		result.MaxOutputTokens = req.MaxTokens
+	}
+	if req.Temperature != nil {
+		result.Temperature = req.Temperature
+	}
+
+	return result, estimatedInputTokens, nil
 }
 
-func convertAnthropicMessage(message anthropicInput) ([]openAIMessage, int, error) {
-	switch content := message.Content.(type) {
+func convertAnthropicMessageToOpenAI2Items(msg anthropicInput) ([]any, int) {
+	var items []any
+	var tokens int
+
+	switch content := msg.Content.(type) {
 	case string:
-		return []openAIMessage{{
-			Role:    message.Role,
-			Content: content,
-		}}, estimateTextTokens(content), nil
+		textType := "input_text"
+		if msg.Role == "assistant" {
+			textType = "output_text"
+		}
+		items = append(items, map[string]any{
+			"type": "message",
+			"role": msg.Role,
+			"content": []map[string]any{{
+				"type": textType,
+				"text": content,
+			}},
+		})
+		tokens = estimateTextTokens(content)
+
 	case []any:
-		return convertAnthropicBlocks(message.Role, content)
-	default:
-		return nil, 0, fmt.Errorf("unsupported message content type for role %s", message.Role)
+		items, tokens = convertAnthropicBlocksToOpenAI2Items(content, msg.Role)
 	}
+
+	return items, tokens
 }
 
-func convertAnthropicBlocks(role string, blocks []any) ([]openAIMessage, int, error) {
-	var (
-		textParts    []string
-		richParts    []map[string]any
-		toolCalls    []openAIToolCall
-		toolMessages []openAIMessage
-		tokens       int
-	)
+func convertAnthropicBlocksToOpenAI2Items(blocks []any, role string) ([]any, int) {
+	var items []any
+	var messageParts []map[string]any
+	var tokens int
+
+	textType := "input_text"
+	if role == "assistant" {
+		textType = "output_text"
+	}
+
+	flushMessage := func() {
+		if len(messageParts) == 0 {
+			return
+		}
+		items = append(items, map[string]any{
+			"type":    "message",
+			"role":    role,
+			"content": messageParts,
+		})
+		messageParts = nil
+	}
 
 	for _, block := range blocks {
-		current, ok := block.(map[string]any)
+		m, ok := block.(map[string]any)
 		if !ok {
 			continue
 		}
 
-		switch current["type"] {
+		blockType, _ := m["type"].(string)
+		switch blockType {
 		case "text":
-			text, _ := current["text"].(string)
-			if text == "" {
-				continue
+			text, _ := m["text"].(string)
+			if text != "" {
+				messageParts = append(messageParts, map[string]any{
+					"type": textType,
+					"text": text,
+				})
+				tokens += estimateTextTokens(text)
 			}
-			textParts = append(textParts, text)
-			richParts = append(richParts, map[string]any{
-				"type": "text",
-				"text": text,
-			})
-			tokens += estimateTextTokens(text)
-		case "image":
-			part, ok := convertImageBlock(current)
-			if ok {
-				richParts = append(richParts, part)
-			}
+
+		case "thinking":
+			// Skip thinking blocks - Claude's internal reasoning
+
 		case "tool_use":
-			id, _ := current["id"].(string)
-			name, _ := current["name"].(string)
-			input := current["input"]
-			args, err := json.Marshal(input)
-			if err != nil {
-				return nil, 0, err
-			}
-			toolCalls = append(toolCalls, openAIToolCall{
-				ID:   id,
-				Type: "function",
-				Function: openAIToolFunction{
-					Name:      name,
-					Arguments: string(args),
-				},
+			flushMessage()
+			callID, _ := m["id"].(string)
+			name, _ := m["name"].(string)
+			args, _ := json.Marshal(m["input"])
+			items = append(items, map[string]any{
+				"type":      "function_call",
+				"call_id":   callID,
+				"name":      name,
+				"arguments": string(args),
 			})
 			tokens += estimateTextTokens(string(args))
+
 		case "tool_result":
-			id, _ := current["tool_use_id"].(string)
-			content := extractToolResultText(current["content"])
-			tokens += estimateTextTokens(content)
-			toolMessages = append(toolMessages, openAIMessage{
-				Role:       "tool",
-				ToolCallID: id,
-				Content:    content,
+			flushMessage()
+			callID, _ := m["tool_use_id"].(string)
+			output := toolResultToString(m["content"])
+			items = append(items, map[string]any{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  output,
 			})
-		case "thinking":
-			continue
+			tokens += estimateTextTokens(output)
+
+		case "image":
+			// Handle image blocks
+			if part := convertImageBlockToOpenAI2(m); part != nil {
+				messageParts = append(messageParts, part)
+			}
 		}
 	}
 
-	converted := make([]openAIMessage, 0, 1+len(toolMessages))
-	if len(richParts) > 0 || len(toolCalls) > 0 {
-		message := openAIMessage{Role: role}
-		switch {
-		case len(richParts) > 0 && containsNonTextPart(richParts):
-			message.Content = richParts
-		case len(textParts) > 0:
-			message.Content = strings.Join(textParts, "\n")
-		}
-		if len(toolCalls) > 0 {
-			message.ToolCalls = toolCalls
-		}
-		converted = append(converted, message)
-	}
-	converted = append(converted, toolMessages...)
-	return converted, tokens, nil
+	flushMessage()
+	return items, tokens
 }
 
-func convertImageBlock(block map[string]any) (map[string]any, bool) {
+func convertImageBlockToOpenAI2(block map[string]any) map[string]any {
 	source, ok := block["source"].(map[string]any)
 	if !ok {
-		return nil, false
+		return nil
 	}
-	if sourceType, _ := source["type"].(string); sourceType == "base64" {
+
+	sourceType, _ := source["type"].(string)
+	switch sourceType {
+	case "base64":
 		mediaType, _ := source["media_type"].(string)
 		data, _ := source["data"].(string)
 		if data == "" {
-			return nil, false
+			return nil
 		}
 		if mediaType == "" {
 			mediaType = "image/png"
 		}
 		return map[string]any{
-			"type": "image_url",
+			"type": "input_image",
 			"image_url": map[string]any{
-				"url": fmt.Sprintf("data:%s;base64,%s", mediaType, data),
+				"url": "data:" + mediaType + ";base64," + data,
 			},
-		}, true
-	}
-	if sourceType, _ := source["type"].(string); sourceType == "url" {
-		value, _ := source["url"].(string)
-		if value == "" {
-			return nil, false
+		}
+	case "url":
+		url, _ := source["url"].(string)
+		if url == "" {
+			return nil
 		}
 		return map[string]any{
-			"type": "image_url",
+			"type": "input_image",
 			"image_url": map[string]any{
-				"url": value,
+				"url": url,
 			},
-		}, true
+		}
 	}
-	return nil, false
+	return nil
 }
 
-func containsNonTextPart(parts []map[string]any) bool {
-	for _, part := range parts {
-		if value, _ := part["type"].(string); value != "text" {
-			return true
+func toolResultToString(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var parts []string
+		for _, item := range v {
+			if block, ok := item.(map[string]any); ok {
+				if text, ok := block["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		data, _ := json.Marshal(v)
+		return string(data)
+	}
+}
+
+func mapToolChoice(toolChoice any, hasToolResult bool) any {
+	if toolChoice == nil {
+		if hasToolResult {
+			return "auto"
+		}
+		return "required"
+	}
+
+	switch tc := toolChoice.(type) {
+	case map[string]any:
+		choiceType, _ := tc["type"].(string)
+		switch choiceType {
+		case "tool":
+			if name, ok := tc["name"].(string); ok && name != "" {
+				return map[string]any{
+					"type": "function",
+					"name": name,
+				}
+			}
+		case "any":
+			return "required"
+		case "auto":
+			return "auto"
+		case "none":
+			return "none"
+		}
+	case string:
+		switch tc {
+		case "any":
+			return "required"
+		default:
+			return tc
+		}
+	}
+
+	return "auto"
+}
+
+func hasToolResult(messages []anthropicInput) bool {
+	for _, msg := range messages {
+		blocks, ok := msg.Content.([]any)
+		if !ok {
+			continue
+		}
+		for _, block := range blocks {
+			m, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := m["type"].(string); t == "tool_result" {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func extractSystemText(system any) string {
-	switch value := system.(type) {
-	case string:
-		return strings.TrimSpace(value)
-	case []any:
-		lines := make([]string, 0, len(value))
-		for _, item := range value {
-			part, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, _ := part["text"].(string); text != "" {
-				lines = append(lines, text)
-			}
-		}
-		return strings.TrimSpace(strings.Join(lines, "\n"))
-	default:
-		return ""
-	}
-}
+// ============ Transform Response ============
 
-func extractToolResultText(content any) string {
-	switch value := content.(type) {
-	case string:
-		return value
-	case []any:
-		lines := make([]string, 0, len(value))
-		for _, item := range value {
-			block, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, _ := block["text"].(string); text != "" {
-				lines = append(lines, text)
-			}
-		}
-		return strings.Join(lines, "\n")
-	default:
-		raw, _ := json.Marshal(value)
-		return string(raw)
-	}
-}
-
-func transformOpenAIResponse(raw []byte, requestedModel string) (map[string]any, error) {
-	var response openAIChatResponse
-	if err := json.Unmarshal(raw, &response); err != nil {
+func transformOpenAI2Response(raw []byte, requestedModel string) (map[string]any, error) {
+	var resp openAI2Response
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
 
-	if response.Error != nil && response.Error.Message != "" {
-		return nil, fmt.Errorf("%s", response.Error.Message)
-	}
-	if len(response.Choices) == 0 {
-		return nil, fmt.Errorf("upstream response contained no choices")
+	// Check for error in response
+	if resp.Error != nil && resp.Error.Message != "" {
+		return nil, fmt.Errorf("%s", resp.Error.Message)
 	}
 
-	choice := response.Choices[0]
-	blocks := make([]map[string]any, 0)
+	var content []map[string]any
+	stopReason := "end_turn"
 
-	switch content := choice.Message.Content.(type) {
-	case string:
-		if strings.TrimSpace(content) != "" {
-			blocks = append(blocks, map[string]any{
-				"type": "text",
-				"text": content,
-			})
-		}
-	case []any:
-		for _, item := range content {
-			block, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if blockType, _ := block["type"].(string); blockType == "text" {
-				if text, _ := block["text"].(string); text != "" {
-					blocks = append(blocks, map[string]any{
-						"type": "text",
-						"text": text,
-					})
+	for _, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for _, part := range item.Content {
+				if part.Type == "output_text" {
+					content = append(content, splitThinkTaggedText(part.Text)...)
 				}
 			}
+		case "function_call":
+			var args map[string]any
+			if item.Arguments != "" {
+				_ = json.Unmarshal([]byte(item.Arguments), &args)
+			}
+			toolID := item.CallID
+			if toolID == "" {
+				toolID = item.ID
+			}
+			content = append(content, map[string]any{
+				"type":  "tool_use",
+				"id":    toolID,
+				"name":  item.Name,
+				"input": args,
+			})
+			stopReason = "tool_use"
 		}
-	}
-
-	for _, toolCall := range choice.Message.ToolCalls {
-		var input map[string]any
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &input); err != nil {
-			input = map[string]any{}
-		}
-		blocks = append(blocks, map[string]any{
-			"type":  "tool_use",
-			"id":    toolCall.ID,
-			"name":  toolCall.Function.Name,
-			"input": input,
-		})
 	}
 
 	model := requestedModel
 	if model == "" {
-		model = response.Model
+		model = resp.ID
 	}
 
 	return map[string]any{
-		"id":            response.ID,
+		"id":            resp.ID,
 		"type":          "message",
 		"role":          "assistant",
 		"model":         model,
-		"content":       blocks,
-		"stop_reason":   mapFinishReason(choice.FinishReason),
+		"content":       content,
+		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage": map[string]any{
-			"input_tokens":  response.Usage.PromptTokens,
-			"output_tokens": response.Usage.CompletionTokens,
+			"input_tokens":  resp.Usage.InputTokens,
+			"output_tokens": resp.Usage.OutputTokens,
 		},
 	}, nil
+}
+
+// ============ Helper Functions ============
+
+func extractSystemText(system any) string {
+	switch s := system.(type) {
+	case string:
+		return strings.TrimSpace(s)
+	case []any:
+		var parts []string
+		for _, block := range s {
+			if m, ok := block.(map[string]any); ok {
+				if text, ok := m["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	}
+	return ""
+}
+
+func splitThinkTaggedText(text string) []map[string]any {
+	const thinkTagOpen = "🐁"
+	const thinkTagClose = " 笔者"
+
+	var blocks []map[string]any
+	for {
+		openIdx := strings.Index(text, thinkTagOpen)
+		if openIdx == -1 {
+			if text != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": text})
+			}
+			return blocks
+		}
+		if openIdx > 0 {
+			blocks = append(blocks, map[string]any{"type": "text", "text": text[:openIdx]})
+		}
+		text = text[openIdx+len(thinkTagOpen):]
+		closeIdx := strings.Index(text, thinkTagClose)
+		if closeIdx == -1 {
+			if text != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": text})
+			}
+			return blocks
+		}
+		if closeIdx > 0 {
+			blocks = append(blocks, map[string]any{"type": "thinking", "thinking": text[:closeIdx]})
+		}
+		text = text[closeIdx+len(thinkTagClose):]
+	}
 }
 
 func resolveModel(requested string, available []string) string {
@@ -404,7 +526,7 @@ func estimateAnthropicInputTokens(req anthropicRequest) int {
 						total += estimateTextTokens(text)
 					}
 				case "tool_result":
-					total += estimateTextTokens(extractToolResultText(block["content"]))
+					total += estimateTextTokens(toolResultToString(block["content"]))
 				case "tool_use":
 					raw, _ := json.Marshal(block["input"])
 					total += estimateTextTokens(string(raw))

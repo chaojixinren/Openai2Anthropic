@@ -78,11 +78,6 @@ func upstreamURL(baseURL, route string) string {
 }
 
 func extractUpstreamError(raw []byte) string {
-	var envelope openAIChatResponse
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Error != nil && envelope.Error.Message != "" {
-		return envelope.Error.Message
-	}
-
 	var fallback map[string]any
 	if err := json.Unmarshal(raw, &fallback); err != nil {
 		return strings.TrimSpace(string(raw))
